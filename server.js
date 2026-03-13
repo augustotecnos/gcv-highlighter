@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const { createCanvas, loadImage } = require('canvas');
 const cors = require('cors');
+const sharp = require('sharp');  // Para orientação EXIF
 
 const app = express();
 app.use(cors());
@@ -15,10 +16,10 @@ app.post('/highlight', upload.single('image'), async (req, res) => {
   let foundWords = 0;
 
   try {
-    const visionJson = req.body.visionJson;
+    const visionJsonStr = req.body.visionJson;
     const imgBuffer = req.file?.buffer;
 
-    if (!visionJson || !imgBuffer) {
+    if (!visionJsonStr || !imgBuffer) {
       throw new Error('Faltando visionJson ou image');
     }
 
@@ -27,84 +28,100 @@ app.post('/highlight', upload.single('image'), async (req, res) => {
       wordsToHighlight = req.body.words.split(',').map(w => w.trim().toUpperCase());
     }
 
-    const data = JSON.parse(visionJson);
-    const annotations = data.responses?.[0]?.textAnnotations?.slice(1) || [];
+    // **CORREÇÃO 1: n8n envia só "responses" array**
+    const visionData = JSON.parse(visionJsonStr);
+    console.log('visionData estrutura:', Object.keys(visionData));
+    
+    let annotations = [];
+    if (Array.isArray(visionData) && visionData.length > 0) {
+      // n8n: [{"textAnnotations": [...]}]
+      annotations = visionData[0]?.textAnnotations?.slice(1) || [];
+    } else if (visionData.responses?.[0]?.textAnnotations) {
+      // Full GCV response
+      annotations = visionData.responses[0].textAnnotations.slice(1);
+    }
 
-    console.log(`Procurando ${wordsToHighlight.length} palavras, encontrou ${annotations.length} anotações`);
+    console.log(`Procurando ${wordsToHighlight.join(',')}, encontrou ${annotations.length} anotações`);
 
-    // Carregar imagem
-    const img = await loadImage(imgBuffer);
+    // **CORREÇÃO 2: Sharp corrige orientação EXIF**
+    const imgSharp = sharp(imgBuffer);
+    const metadata = await imgSharp.metadata();
+    const img = await loadImage(await imgSharp.toBuffer());
+
     const canvas = createCanvas(img.width, img.height);
     const ctx = canvas.getContext('2d');
 
-    // Desenhar imagem original (mantém orientação)
+    // Desenhar imagem corrigida
     ctx.drawImage(img, 0, 0);
 
-    // Desenhar retângulos BRILHANTES e preenchidos
+    // **CORREÇÃO 3: Match case-insensitive + log detalhado**
     annotations.forEach((word, index) => {
-      const text = word.description?.toUpperCase() || '';
-      if (wordsToHighlight.some(target => text.includes(target))) {
-        const box = word.boundingPoly?.vertices || [];
-        if (box.length === 4) {
-          const x1 = Math.min(...box.map(v => v.x));
-          const y1 = Math.min(...box.map(v => v.y));
-          const x2 = Math.max(...box.map(v => v.x));
-          const y2 = Math.max(...box.map(v => v.y));
+      const text = word.description.toUpperCase();
+      const match = wordsToHighlight.find(target => text.includes(target));
+      
+      console.log(`Word ${index}: "${word.description}" | Match: ${match || 'NOPE'}`);
+      
+      if (match) {
+        const box = word.boundingPoly.vertices;
+        const x1 = Math.min(...box.map(v => v.x));
+        const y1 = Math.min(...box.map(v => v.y));
+        const x2 = Math.max(...box.map(v => v.x));
+        const y2 = Math.max(...box.map(v => v.y));
 
-          // Cores OPACAS e preenchidas para visibilidade máxima
-          const colors = [
-            { stroke: '#00FF00', fill: 'rgba(0,255,0,0.3)' },    // Verde
-            { stroke: '#FF0000', fill: 'rgba(255,0,0,0.3)' },     // Vermelho
-            { stroke: '#0000FF', fill: 'rgba(0,0,255,0.3)' },     // Azul
-            { stroke: '#FFA500', fill: 'rgba(255,165,0,0.3)' },   // Laranja
-            { stroke: '#FF00FF', fill: 'rgba(255,0,255,0.3)' }    // Magenta
-          ];
-          const color = colors[foundWords % colors.length];
+        // Retângulo ULTRA VISÍVEL
+        const colors = [
+          { stroke: '#00FF00', fill: 'rgba(0,255,0,0.4)' },
+          { stroke: '#FF0000', fill: 'rgba(255,0,0,0.4)' },
+          { stroke: '#0000FF', fill: 'rgba(0,0,255,0.4)' },
+          { stroke: '#FFA500', fill: 'rgba(255,165,0,0.4)' },
+          { stroke: '#FF00FF', fill: 'rgba(255,0,255,0.4)' }
+        ];
+        const color = colors[foundWords % colors.length];
 
-          // Fundo semi-transparente
-          ctx.fillStyle = color.fill;
-          ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+        ctx.fillStyle = color.fill;
+        ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
 
-          // Borda grossa
-          ctx.strokeStyle = color.stroke;
-          ctx.lineWidth = 8;
-          ctx.lineCap = 'round';
-          ctx.setLineDash([]);
-          ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        ctx.strokeStyle = color.stroke;
+        ctx.lineWidth = 10;
+        ctx.lineCap = 'round';
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
 
-          // Texto GRANDE e branco com sombra
-          ctx.shadowColor = 'black';
-          ctx.shadowBlur = 4;
-          ctx.fillStyle = 'white';
-          ctx.font = 'bold 32px Arial';
-          ctx.textAlign = 'left';
-          ctx.textBaseline = 'top';
-          ctx.fillText(`${word.description} (${foundWords + 1})`, x1 + 5, y1 - 5);
-          ctx.shadowBlur = 0;  // Reset sombra
+        // Texto com sombra
+        ctx.shadowColor = 'black';
+        ctx.shadowBlur = 5;
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 36px Arial';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(`${word.description} [${match}]`, x1 + 8, y1 - 8);
+        ctx.shadowBlur = 0;
 
-          console.log(`Destacou: "${word.description}" em [${x1},${y1},${x2},${y2}]`);
-          foundWords++;
-        }
+        foundWords++;
       }
     });
 
-    console.log(`Total destacadas: ${foundWords}`);
+    console.log(`✅ Total destacadas: ${foundWords}`);
 
-    // **NÃO REDIMENSIONAR** - mantém proporção e orientação original
-    const buffer = canvas.toBuffer('image/jpeg', { quality: 0.95 });
+    // **CORREÇÃO 4: Sharp final com orientação**
+    const highlightedBuffer = canvas.toBuffer('image/png');  // PNG preserva melhor
+    const finalBuffer = await sharp(highlightedBuffer)
+      .jpeg({ quality: 95 })
+      .toBuffer();
 
     res.set({
       'Content-Type': 'image/jpeg',
-      'Content-Disposition': 'attachment; filename="highlighted.jpg"'
+      'Content-Disposition': 'attachment; filename="highlighted.jpg"',
+      'Access-Control-Expose-Headers': 'Content-Disposition'
     });
-    res.send(buffer);
+    res.send(finalBuffer);
 
   } catch (error) {
-    console.error('Erro:', error.message);
+    console.error('❌ Erro completo:', error);
     res.status(500).json({ 
       error: error.message, 
-      foundWords: foundWords || 0,
-      wordsToHighlight: req.body.words ? req.body.words.split(',') : 'default'
+      foundWords,
+      wordsToHighlight: req.body.words?.split(',') || 'default',
+      visionKeys: visionJsonStr ? Object.keys(JSON.parse(visionJsonStr)) : 'null'
     });
   }
 });
