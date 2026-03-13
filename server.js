@@ -12,14 +12,24 @@ const upload = multer({ storage: multer.memoryStorage() });
 app.get('/', (_req, res) => res.send('GCV Highlighter OK ✅'));
 
 app.post('/highlight', upload.single('image'), async (req, res) => {
+  let foundWords = 0;  // Declarada aqui, visível em try/catch
+
   try {
     const visionJson = req.body.visionJson;
-    const imgBuffer = req.file.buffer;
+    const imgBuffer = req.file?.buffer;  // Null check
 
-    const wordsToHighlight = ['BANESE', 'Depósito', 'Data', '337', 'Controle', 'Valor'];
+    if (!visionJson || !imgBuffer) {
+      throw new Error('Faltando visionJson ou image');
+    }
+
+    // Suporte a words custom (opcional, fallback hardcoded)
+    let wordsToHighlight = ['BANESE', 'Depósito', 'Data', '337', 'Controle', 'Valor'];
+    if (req.body.words) {
+      wordsToHighlight = req.body.words.split(',').map(w => w.trim().toUpperCase());
+    }
 
     const data = JSON.parse(visionJson);
-    const annotations = data.responses[0].textAnnotations.slice(1);
+    const annotations = data.responses?.[0]?.textAnnotations?.slice(1) || [];
 
     // Carregar imagem
     const img = await loadImage(imgBuffer);
@@ -29,31 +39,31 @@ app.post('/highlight', upload.single('image'), async (req, res) => {
     // Desenhar imagem original
     ctx.drawImage(img, 0, 0);
 
-    let foundWords = 0;
-
     // Desenhar retângulos
     annotations.forEach(word => {
-      const text = word.description.toUpperCase();
-      if (wordsToHighlight.some(target => text.includes(target.toUpperCase()))) {
-        const box = word.boundingPoly.vertices;
-        const x1 = Math.min(...box.map(v => v.x));
-        const y1 = Math.min(...box.map(v => v.y));
-        const x2 = Math.max(...box.map(v => v.x));
-        const y2 = Math.max(...box.map(v => v.y));
+      const text = word.description?.toUpperCase() || '';
+      if (wordsToHighlight.some(target => text.includes(target))) {
+        const box = word.boundingPoly?.vertices || [];
+        if (box.length === 4) {
+          const x1 = Math.min(...box.map(v => v.x));
+          const y1 = Math.min(...box.map(v => v.y));
+          const x2 = Math.max(...box.map(v => v.x));
+          const y2 = Math.max(...box.map(v => v.y));
 
-        // Cores diferentes
-        const colors = ['lime', 'red', 'blue', 'orange', 'magenta'];
-        ctx.strokeStyle = colors[foundWords % colors.length];
-        ctx.lineWidth = 6;
-        ctx.setLineDash([]);
-        ctx.strokeRect(x1, y1, x2-x1, y2-y1);
+          // Cores diferentes
+          const colors = ['lime', 'red', 'blue', 'orange', 'magenta'];
+          ctx.strokeStyle = colors[foundWords % colors.length];
+          ctx.lineWidth = 6;
+          ctx.setLineDash([]);
+          ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
 
-        // Texto
-        ctx.fillStyle = colors[foundWords % colors.length];
-        ctx.font = 'bold 28px Arial';
-        ctx.fillText(word.description, x1, Math.max(0, y1-10));
+          // Texto
+          ctx.fillStyle = colors[foundWords % colors.length];
+          ctx.font = 'bold 28px Arial';
+          ctx.fillText(word.description, x1, Math.max(0, y1 - 10));
 
-        foundWords++;
+          foundWords++;
+        }
       }
     });
 
@@ -69,7 +79,11 @@ app.post('/highlight', upload.single('image'), async (req, res) => {
 
   } catch (error) {
     console.error('Erro:', error.message);
-    res.status(500).json({ error: error.message, foundWords: foundWords || 0 });
+    res.status(500).json({ 
+      error: error.message, 
+      foundWords: foundWords || 0,
+      wordsToHighlight: req.body.words ? req.body.words.split(',') : 'default'
+    });
   }
 });
 
