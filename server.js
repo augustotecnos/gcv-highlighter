@@ -1,6 +1,6 @@
 const express = require('express');
 const multer = require('multer');
-const sharp = require('sharp');
+const { createCanvas, loadImage } = require('canvas');
 const cors = require('cors');
 
 const app = express();
@@ -21,16 +21,17 @@ app.post('/highlight', upload.single('image'), async (req, res) => {
     const data = JSON.parse(visionJson);
     const annotations = data.responses[0].textAnnotations.slice(1);
 
-    // Metadata ANTES de qualquer resize
-    const metadata = await sharp(imgBuffer).metadata();
-    const imgWidth = metadata.width;
-    const imgHeight = metadata.height;
+    // Carregar imagem
+    const img = await loadImage(imgBuffer);
+    const canvas = createCanvas(img.width, img.height);
+    const ctx = canvas.getContext('2d');
+
+    // Desenhar imagem original
+    ctx.drawImage(img, 0, 0);
 
     let foundWords = 0;
 
-    // Criar SVG com dimensões EXATAS
-    let svgOverlay = `<svg width="${imgWidth}" height="${imgHeight}" xmlns="http://www.w3.org/2000/svg">`;
-
+    // Desenhar retângulos
     annotations.forEach(word => {
       const text = word.description.toUpperCase();
       if (wordsToHighlight.some(target => text.includes(target.toUpperCase()))) {
@@ -40,27 +41,34 @@ app.post('/highlight', upload.single('image'), async (req, res) => {
         const x2 = Math.max(...box.map(v => v.x));
         const y2 = Math.max(...box.map(v => v.y));
 
-        const stroke = foundWords % 5 === 0 ? '#00FF00' : '#FF0000';
-        svgOverlay += `<rect x="${x1}" y="${y1}" width="${x2-x1}" height="${y2-y1}" stroke="${stroke}" stroke-width="6" fill="none" opacity="0.8"/><text x="${x1}" y="${Math.max(0,y1-25)}" font-size="28" fill="${stroke}" font-weight="bold">${word.description}</text>`;
+        // Cores diferentes
+        const colors = ['lime', 'red', 'blue', 'orange', 'magenta'];
+        ctx.strokeStyle = colors[foundWords % colors.length];
+        ctx.lineWidth = 6;
+        ctx.setLineDash([]);
+        ctx.strokeRect(x1, y1, x2-x1, y2-y1);
+
+        // Texto
+        ctx.fillStyle = colors[foundWords % colors.length];
+        ctx.font = 'bold 28px Arial';
+        ctx.fillText(word.description, x1, Math.max(0, y1-10));
+
         foundWords++;
       }
     });
 
-    svgOverlay += '</svg>';
-    const svgBuffer = Buffer.from(svgOverlay);
+    // Redimensionar e JPG
+    const resized = createCanvas(1200, 1200 * (img.height / img.width));
+    const resizedCtx = resized.getContext('2d');
+    resizedCtx.drawImage(canvas, 0, 0, 1200, 1200 * (img.height / img.width));
 
-    // SEM RESIZE antes do composite!
-    const result = await sharp(imgBuffer)
-      .composite([{ input: svgBuffer, top: 0, left: 0 }])
-      .resize(1200, null, { fit: 'inside' })  // DEPOIS do composite
-      .jpeg({ quality: 85 })
-      .toBuffer();
+    const buffer = resized.toBuffer('image/jpeg', { quality: 0.85 });
 
     res.set('Content-Type', 'image/jpeg');
-    res.send(result);
+    res.send(buffer);
 
   } catch (error) {
-    console.error('Erro completo:', error);
+    console.error('Erro:', error.message);
     res.status(500).json({ error: error.message, foundWords: foundWords || 0 });
   }
 });
